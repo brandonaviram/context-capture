@@ -477,6 +477,129 @@
       z-index: 10;
     }
 
+    /* ===== TAGS ===== */
+    .card-tags {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 4px;
+      margin-top: 8px;
+    }
+
+    .tag {
+      display: inline-flex;
+      align-items: center;
+      gap: 4px;
+      padding: 2px 8px;
+      background: var(--color-bg);
+      border: 1px solid var(--color-border);
+      border-radius: 100px;
+      font-family: var(--font-mono);
+      font-size: 10px;
+      color: var(--color-text-muted);
+      cursor: pointer;
+      transition: all 0.15s ease;
+    }
+
+    .tag:hover {
+      border-color: var(--color-border-subtle);
+      color: var(--color-text-secondary);
+    }
+
+    .tag.active {
+      background: var(--color-amber);
+      border-color: var(--color-amber);
+      color: var(--color-bg);
+    }
+
+    .tag-remove {
+      opacity: 0;
+      font-size: 8px;
+      margin-left: 2px;
+    }
+
+    .tag:hover .tag-remove {
+      opacity: 1;
+    }
+
+    .tag-input {
+      background: transparent;
+      border: none;
+      outline: none;
+      font-family: var(--font-mono);
+      font-size: 10px;
+      color: var(--color-text-secondary);
+      width: 60px;
+    }
+
+    .tag-input::placeholder {
+      color: var(--color-text-muted);
+    }
+
+    .add-tag-btn {
+      padding: 2px 8px;
+      background: transparent;
+      border: 1px dashed var(--color-border);
+      border-radius: 100px;
+      font-family: var(--font-mono);
+      font-size: 10px;
+      color: var(--color-text-muted);
+      cursor: pointer;
+      transition: all 0.15s ease;
+    }
+
+    .add-tag-btn:hover {
+      border-color: var(--color-border-subtle);
+      color: var(--color-text-secondary);
+    }
+
+    /* ===== TAG FILTER BAR ===== */
+    .tag-filter-bar {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 8px 24px;
+      border-bottom: 1px solid var(--color-border);
+      background: var(--color-bg);
+      overflow-x: auto;
+    }
+
+    .tag-filter-bar:empty {
+      display: none;
+    }
+
+    .tag-filter-label {
+      font-family: var(--font-mono);
+      font-size: 10px;
+      color: var(--color-text-muted);
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      flex-shrink: 0;
+    }
+
+    .tag-filters {
+      display: flex;
+      gap: 6px;
+      flex-wrap: wrap;
+    }
+
+    .clear-filter-btn {
+      padding: 2px 8px;
+      background: transparent;
+      border: 1px solid var(--color-border);
+      border-radius: 100px;
+      font-family: var(--font-mono);
+      font-size: 10px;
+      color: var(--color-text-muted);
+      cursor: pointer;
+      margin-left: auto;
+      flex-shrink: 0;
+    }
+
+    .clear-filter-btn:hover {
+      border-color: var(--color-red);
+      color: var(--color-red);
+    }
+
     /* ===== FULLSCREEN CARD VIEW ===== */
     .fullscreen-overlay {
       position: fixed;
@@ -1065,7 +1188,19 @@ Be specific and technical. Write as a helpful note to your future self.`
 
     const DRAG_THRESHOLD = 5; // Minimum pixels before drag starts
 
-    function Card({ card, onDragStart, onDragEnd, onDelete, onExpand, onMarkViewed, searchMatch, searchHidden, viewport }) {
+    function Card({ card, onDragStart, onDragEnd, onDelete, onExpand, onMarkViewed, onAddTag, onRemoveTag, onTagClick, onCopyMarkdown, activeTagFilter, searchMatch, searchHidden, viewport }) {
+      const [isAddingTag, setIsAddingTag] = useState(false);
+      const [newTag, setNewTag] = useState('');
+      const tagInputRef = useRef(null);
+
+      const handleAddTag = () => {
+        const tag = newTag.trim().toLowerCase().replace(/^#/, '');
+        if (tag && !card.tags?.includes(tag)) {
+          onAddTag(card.id, tag);
+        }
+        setNewTag('');
+        setIsAddingTag(false);
+      };
       const [isDragging, setIsDragging] = useState(false);
       const [isPotentialDrag, setIsPotentialDrag] = useState(false);
       const [startPos, setStartPos] = useState({ x: 0, y: 0 });
@@ -1180,8 +1315,59 @@ Be specific and technical. Write as a helpful note to your future self.`
             <p className={`card-caption ${card.processing ? 'loading processing-pulse' : ''}`}>
               {card.processing ? 'Analyzing screenshot...' : card.caption}
             </p>
+
+            {/* Tags */}
+            {!card.processing && (
+              <div className="card-tags">
+                {card.tags?.map(tag => (
+                  <span
+                    key={tag}
+                    className={`tag ${activeTagFilter === tag ? 'active' : ''}`}
+                    onClick={(e) => { e.stopPropagation(); onTagClick(tag); }}
+                  >
+                    #{tag}
+                    <span
+                      className="tag-remove"
+                      onClick={(e) => { e.stopPropagation(); onRemoveTag(card.id, tag); }}
+                    >✕</span>
+                  </span>
+                ))}
+                {isAddingTag ? (
+                  <input
+                    ref={tagInputRef}
+                    type="text"
+                    className="tag-input"
+                    placeholder="#tag"
+                    value={newTag}
+                    onChange={(e) => setNewTag(e.target.value)}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter') handleAddTag();
+                      if (e.key === 'Escape') { setIsAddingTag(false); setNewTag(''); }
+                    }}
+                    onBlur={handleAddTag}
+                    autoFocus
+                    onClick={(e) => e.stopPropagation()}
+                    onMouseDown={(e) => e.stopPropagation()}
+                  />
+                ) : (
+                  <button
+                    className="add-tag-btn"
+                    onClick={(e) => { e.stopPropagation(); setIsAddingTag(true); }}
+                    onMouseDown={(e) => e.stopPropagation()}
+                  >+</button>
+                )}
+              </div>
+            )}
+
             <div className="card-meta">
               {new Date(card.timestamp).toLocaleString()}
+              {!card.processing && (
+                <span
+                  style={{ marginLeft: 8, cursor: 'pointer' }}
+                  onClick={(e) => { e.stopPropagation(); onCopyMarkdown(card); }}
+                  title="Copy as markdown"
+                >📋</span>
+              )}
             </div>
           </div>
         </div>
@@ -1202,6 +1388,7 @@ Be specific and technical. Write as a helpful note to your future self.`
       const [isSpaceHeld, setIsSpaceHeld] = useState(false);
       const [showZoomIndicator, setShowZoomIndicator] = useState(false);
       const [zoomLevel, setZoomLevel] = useState(100);
+      const [activeTagFilter, setActiveTagFilter] = useState(null);
       const canvasRef = useRef(null);
       const viewportRef = useRef(null);
       const fileInputRef = useRef(null);
@@ -1242,17 +1429,20 @@ Be specific and technical. Write as a helpful note to your future self.`
           return;
         }
 
+        // Always do text search first (guaranteed to find text matches)
+        const query = searchQuery.toLowerCase();
+        const textMatches = board.cards
+          .filter(c => c.caption?.toLowerCase().includes(query))
+          .map(c => c.id);
+
+        // Show text matches immediately
+        setSearchResults(textMatches.length > 0 ? textMatches : []);
+
         if (!brainConnected) {
-          // Fallback to simple text search when brain is offline
-          const query = searchQuery.toLowerCase();
-          const matches = board.cards
-            .filter(c => c.caption?.toLowerCase().includes(query))
-            .map(c => c.id);
-          setSearchResults(matches.length > 0 ? matches : []);
-          return;
+          return; // Text search only when brain is offline
         }
 
-        // Debounced semantic search
+        // Debounced semantic search (enhances text search)
         searchTimeoutRef.current = setTimeout(async () => {
           try {
             const results = await brainSearch(searchQuery, 5);
@@ -1270,15 +1460,17 @@ Be specific and technical. Write as a helpful note to your future self.`
               }))
             }));
 
-            setSearchResults(matchIds);
-          } catch (err) {
-            console.error('Search failed:', err);
-            // Fallback to text search
-            const query = searchQuery.toLowerCase();
-            const matches = board.cards
+            // Re-calc text matches (board might have changed)
+            const currentTextMatches = board.cards
               .filter(c => c.caption?.toLowerCase().includes(query))
               .map(c => c.id);
-            setSearchResults(matches.length > 0 ? matches : []);
+
+            // Merge semantic matches with text matches (text always included)
+            const allMatches = [...new Set([...matchIds, ...currentTextMatches])];
+            setSearchResults(allMatches.length > 0 ? allMatches : []);
+          } catch (err) {
+            console.error('Search failed:', err);
+            // Keep text matches on error
           }
         }, 300);
 
@@ -1790,6 +1982,54 @@ Be specific and technical. Write as a helpful note to your future self.`
         }));
       };
 
+      // Tag handlers
+      const handleAddTag = (cardId, tag) => {
+        setBoard(prev => ({
+          ...prev,
+          cards: prev.cards.map(c => {
+            if (c.id !== cardId) return c;
+            const tags = c.tags || [];
+            if (tags.includes(tag)) return c;
+            return { ...c, tags: [...tags, tag] };
+          })
+        }));
+      };
+
+      const handleRemoveTag = (cardId, tag) => {
+        setBoard(prev => ({
+          ...prev,
+          cards: prev.cards.map(c => {
+            if (c.id !== cardId) return c;
+            return { ...c, tags: (c.tags || []).filter(t => t !== tag) };
+          })
+        }));
+      };
+
+      const handleTagClick = (tag) => {
+        setActiveTagFilter(prev => prev === tag ? null : tag);
+      };
+
+      const handleCopyMarkdown = async (card) => {
+        const md = `![Screenshot](${card.image})\n\n${card.caption}\n\n*Captured: ${new Date(card.timestamp).toLocaleString()}*${card.tags?.length ? `\n\nTags: ${card.tags.map(t => '#' + t).join(' ')}` : ''}`;
+        try {
+          await navigator.clipboard.writeText(md);
+          // Visual feedback could be a toast, but for now just copy
+        } catch (err) {
+          console.error('Failed to copy:', err);
+        }
+      };
+
+      // Get all unique tags across cards
+      const getAllTags = () => {
+        const tagSet = new Set();
+        board.cards.forEach(c => {
+          (c.tags || []).forEach(t => tagSet.add(t));
+        });
+        return Array.from(tagSet).sort();
+      };
+
+      const allTags = getAllTags();
+
       // Calculate stats
       const totalCards = board.cards.length;
       const unviewedCount = board.cards.filter(c => !c.viewed && !c.processing).length;
@@ -1929,6 +2169,29 @@ Be specific and technical. Write as a helpful note to your future self.`
             </div>
           </header>
 
+          {/* Tag Filter Bar */}
+          {allTags.length > 0 && (
+            <div className="tag-filter-bar">
+              <span className="tag-filter-label">Filter:</span>
+              <div className="tag-filters">
+                {allTags.map(tag => (
+                  <span
+                    key={tag}
+                    className={`tag ${activeTagFilter === tag ? 'active' : ''}`}
+                    onClick={() => handleTagClick(tag)}
+                  >
+                    #{tag}
+                  </span>
+                ))}
+              </div>
+              {activeTagFilter && (
+                <button className="clear-filter-btn" onClick={() => setActiveTagFilter(null)}>
+                  Clear
+                </button>
+              )}
+            </div>
+          )}
+
           <div
             ref={canvasRef}
             className={`canvas-container ${isSpaceHeld ? 'space-held' : ''} ${isPanning ? 'panning' : ''}`}
@@ -1966,6 +2229,10 @@ Be specific and technical. Write as a helpful note to your future self.`
                   const isMatch = isSearching && searchResults.includes(card.id);
                   const isHidden = isSearching && !isMatch;
 
+                  // Tag filter
+                  const matchesTagFilter = !activeTagFilter || (card.tags || []).includes(activeTagFilter);
+                  const isTagFiltered = activeTagFilter && !matchesTagFilter;
+
                   return (
                     <Card
                       key={card.id}
@@ -1975,8 +2242,13 @@ Be specific and technical. Write as a helpful note to your future self.`
                       onDelete={handleDeleteCard}
                       onExpand={setExpandedCard}
                       onMarkViewed={handleMarkViewed}
+                      onAddTag={handleAddTag}
+                      onRemoveTag={handleRemoveTag}
+                      onTagClick={handleTagClick}
+                      onCopyMarkdown={handleCopyMarkdown}
+                      activeTagFilter={activeTagFilter}
                       searchMatch={isMatch}
-                      searchHidden={isHidden}
+                      searchHidden={isHidden || isTagFiltered}
                       viewport={viewport}
                     />
                   );

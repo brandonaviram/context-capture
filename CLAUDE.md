@@ -94,7 +94,18 @@ First use prompts for Anthropic API key. Stored in localStorage. BYOK model.
 | ⌘/ | Focus search |
 | ⌘V | Paste screenshot |
 | ESC | Clear search / close modal |
-| Double-click | Expand card fullscreen |
+| Double-click card | Expand card fullscreen |
+| Space + drag | Pan canvas |
+| Scroll wheel | Zoom in/out |
+| Double-click canvas | Reset view |
+| 0 or Home | Reset view |
+
+## Canvas Navigation
+
+The canvas supports Figma-style navigation:
+- **Pan:** Hold Space + drag (cursor changes to grab hand)
+- **Zoom:** Scroll wheel (zooms centered on cursor)
+- **Reset:** Double-click empty canvas, or press 0/Home
 
 ## v0 Scope (Jobs-Mode Approved)
 
