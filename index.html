@@ -1241,6 +1241,8 @@ Be specific and technical. Write as a helpful note to your future self.`
     const MIN_CARD_WIDTH = 150;
     const MIN_CARD_HEIGHT = 120;
     const RESIZE_HANDLE_SIZE = 12;
+    const CULLING_MARGIN = 200; // Extra margin for viewport culling
+    const LOD_ZOOM_THRESHOLD = 0.3; // Below this zoom, use simplified rendering
 
     // ===== PIXI CANVAS COMPONENT =====
     function PixiCanvas({
@@ -1261,6 +1263,7 @@ Be specific and technical. Write as a helpful note to your future self.`
       const appRef = useRef(null);
       const worldRef = useRef(null);
       const cardSpritesRef = useRef(new Map()); // cardId -> PIXI.Container
+      const textureCache = useRef(new Map()); // imageHash -> PIXI.Texture
       const isDraggingRef = useRef(false);
       const dragCardRef = useRef(null);
       const dragOffsetRef = useRef({ x: 0, y: 0 });
@@ -1270,6 +1273,47 @@ Be specific and technical. Write as a helpful note to your future self.`
       const isResizingRef = useRef(false);
       const resizeCardRef = useRef(null);
       const resizeStartRef = useRef({ x: 0, y: 0, width: 0, height: 0 });
+      const cullingFrameRef = useRef(null);
+      const scheduleCullingRef = useRef(null); // Ref to latest scheduleCulling
+
+      // Get visible viewport bounds in world coordinates
+      const getViewportBounds = useCallback(() => {
+        if (!containerRef.current) return null;
+        const rect = containerRef.current.getBoundingClientRect();
+        const zoom = viewport.current.zoom;
+        return {
+          left: viewport.current.x - CULLING_MARGIN / zoom,
+          top: viewport.current.y - CULLING_MARGIN / zoom,
+          right: viewport.current.x + (rect.width / zoom) + CULLING_MARGIN / zoom,
+          bottom: viewport.current.y + (rect.height / zoom) + CULLING_MARGIN / zoom,
+          zoom
+        };
+      }, []);
+
+      // Check if a card is within viewport bounds
+      const isCardVisible = useCallback((card, bounds) => {
+        if (!bounds) return true;
+        const cardWidth = card.width || DEFAULT_CARD_WIDTH;
+        const cardHeight = card.height || DEFAULT_CARD_HEIGHT;
+        return !(
+          card.x + cardWidth < bounds.left ||
+          card.x > bounds.right ||
+          card.y + cardHeight < bounds.top ||
+          card.y > bounds.bottom
+        );
+      }, []);
+
+      // Get or create cached texture from base64 image
+      const getTexture = useCallback((imageData) => {
+        // Use first 100 chars of base64 as hash key (enough to be unique)
+        const hashKey = imageData.slice(0, 100);
+        if (textureCache.current.has(hashKey)) {
+          return textureCache.current.get(hashKey);
+        }
+        const texture = PIXI.Texture.from(imageData);
+        textureCache.current.set(hashKey, texture);
+        return texture;
+      }, []);
 
       // Initialize PixiJS Application
       useEffect(() => {
@@ -1337,6 +1381,7 @@ Be specific and technical. Write as a helpful note to your future self.`
 
               panStartRef.current = { x: e.clientX, y: e.clientY };
               onViewportChange?.();
+              scheduleCullingRef.current?.();
             }
           });
 
@@ -1370,6 +1415,7 @@ Be specific and technical. Write as a helpful note to your future self.`
             world.scale.set(viewport.current.zoom);
             world.position.set(-viewport.current.x * viewport.current.zoom, -viewport.current.y * viewport.current.zoom);
             onViewportChange?.();
+            scheduleCullingRef.current?.();
           }, { passive: false });
 
           // Touch pinch zoom
@@ -1397,6 +1443,7 @@ Be specific and technical. Write as a helpful note to your future self.`
                 world.scale.set(viewport.current.zoom);
                 world.position.set(-viewport.current.x * viewport.current.zoom, -viewport.current.y * viewport.current.zoom);
                 onViewportChange?.();
+                scheduleCullingRef.current?.();
               }
 
               lastPinchDistRef.current = dist;
@@ -1410,6 +1457,7 @@ Be specific and technical. Write as a helpful note to your future self.`
               world.scale.set(1);
               world.position.set(0, 0);
               onViewportChange?.();
+              scheduleCullingRef.current?.();
             }
           });
 
@@ -1530,9 +1578,9 @@ Be specific and technical. Write as a helpful note to your future self.`
             container.addChild(imgBg);
             container.imgBg = imgBg;
 
-            // Load image as texture
+            // Load image as texture (using cache)
             if (card.image) {
-              const texture = PIXI.Texture.from(card.image);
+              const texture = getTexture(card.image);
               const sprite = new PIXI.Sprite(texture);
               sprite.width = cardWidth;
               sprite.height = imageHeight;
@@ -1798,6 +1846,61 @@ Be specific and technical. Write as a helpful note to your future self.`
           }
         });
       }, [cards, searchResults, activeTagFilter, onCardDragEnd, onCardResize, onCardExpand, onCardDelete, onCardMarkViewed]);
+
+      // Update card visibility based on viewport (culling)
+      const updateCulling = useCallback(() => {
+        if (!worldRef.current) return;
+
+        const bounds = getViewportBounds();
+        if (!bounds) return;
+
+        const isLOD = bounds.zoom < LOD_ZOOM_THRESHOLD;
+
+        cardSpritesRef.current.forEach((container, cardId) => {
+          const card = cards.find(c => c.id === cardId);
+          if (!card) return;
+
+          const visible = isCardVisible(card, bounds);
+
+          // Show/hide based on visibility (culling)
+          container.visible = visible;
+
+          // LOD: hide text when zoomed out far
+          if (container.captionText) {
+            container.captionText.visible = !isLOD;
+          }
+          if (container.timeText) {
+            container.timeText.visible = !isLOD;
+          }
+          if (container.deleteBtn) {
+            container.deleteBtn.visible = !isLOD;
+          }
+          if (container.resizeHandle) {
+            container.resizeHandle.visible = !isLOD;
+          }
+        });
+      }, [cards, getViewportBounds, isCardVisible]);
+
+      // Schedule culling update (debounced via requestAnimationFrame)
+      const scheduleCulling = useCallback(() => {
+        if (cullingFrameRef.current) {
+          cancelAnimationFrame(cullingFrameRef.current);
+        }
+        cullingFrameRef.current = requestAnimationFrame(() => {
+          updateCulling();
+          cullingFrameRef.current = null;
+        });
+      }, [updateCulling]);
+
+      // Keep ref in sync for event handlers
+      useEffect(() => {
+        scheduleCullingRef.current = scheduleCulling;
+      }, [scheduleCulling]);
+
+      // Run culling on mount and when cards change
+      useEffect(() => {
+        scheduleCulling();
+      }, [cards, scheduleCulling]);
 
       // Handle file drop
       const handleDrop = (e) => {
