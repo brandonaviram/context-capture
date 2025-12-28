@@ -436,13 +436,45 @@
       font-size: 11px;
     }
 
-    /* ===== CARD COUNT ===== */
-    .card-count {
+    /* ===== CARD STATS ===== */
+    .card-stats {
+      display: flex;
+      align-items: center;
+      gap: 16px;
       font-family: var(--font-mono);
       font-size: 11px;
       color: var(--color-text-muted);
       text-transform: uppercase;
       letter-spacing: 0.05em;
+    }
+
+    .stat-item {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
+
+    .stat-value {
+      color: var(--color-text-secondary);
+      font-weight: 500;
+    }
+
+    .stat-value.highlight {
+      color: var(--color-amber);
+    }
+
+    /* ===== UNREVIEWED INDICATOR ===== */
+    .unreviewed-dot {
+      position: absolute;
+      top: -4px;
+      right: -4px;
+      width: 10px;
+      height: 10px;
+      background: var(--color-amber);
+      border-radius: 50%;
+      border: 2px solid var(--color-surface);
+      box-shadow: 0 0 8px var(--color-amber);
+      z-index: 10;
     }
 
     /* ===== FULLSCREEN CARD VIEW ===== */
@@ -621,6 +653,59 @@
       font-size: 16px;
     }
 
+    /* ===== MOBILE ADD BUTTON ===== */
+    .mobile-add-btn {
+      position: fixed;
+      bottom: 24px;
+      left: 50%;
+      transform: translateX(-50%);
+      padding: 14px 28px;
+      background: var(--color-amber);
+      border: none;
+      border-radius: 100px;
+      color: var(--color-bg);
+      font-family: var(--font-display);
+      font-size: 15px;
+      font-weight: 600;
+      cursor: pointer;
+      box-shadow: 0 4px 20px rgba(245, 158, 11, 0.4);
+      z-index: 100;
+      display: none;
+    }
+
+    .mobile-add-btn:active {
+      transform: translateX(-50%) scale(0.96);
+    }
+
+    @media (max-width: 768px) {
+      .mobile-add-btn {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+      }
+
+      .header {
+        padding: 12px 16px;
+      }
+
+      .logo-text {
+        display: none;
+      }
+
+      .search-input {
+        width: 140px;
+      }
+
+      .search-input:focus {
+        width: 180px;
+      }
+
+      .card-stats {
+        gap: 10px;
+        font-size: 10px;
+      }
+    }
+
     /* ===== SEARCH RESULTS HIGHLIGHT ===== */
     .card.search-match {
       border-color: var(--color-amber);
@@ -761,6 +846,18 @@
         }
       }
     }
+
+    // Debounce utility for performance
+    function debounce(fn, delay) {
+      let timeoutId;
+      return function(...args) {
+        clearTimeout(timeoutId);
+        timeoutId = setTimeout(() => fn.apply(this, args), delay);
+      };
+    }
+
+    // Create debounced version of saveBoard (250ms delay)
+    const debouncedSaveBoard = debounce(saveBoard, 250);
 
     // Compress image to reduce storage size
     function compressImage(base64, maxWidth = 800, quality = 0.7) {
@@ -968,7 +1065,7 @@ Be specific and technical. Write as a helpful note to your future self.`
 
     const DRAG_THRESHOLD = 5; // Minimum pixels before drag starts
 
-    function Card({ card, onDragStart, onDragEnd, onDelete, onExpand, searchMatch, searchHidden, viewport }) {
+    function Card({ card, onDragStart, onDragEnd, onDelete, onExpand, onMarkViewed, searchMatch, searchHidden, viewport }) {
       const [isDragging, setIsDragging] = useState(false);
       const [isPotentialDrag, setIsPotentialDrag] = useState(false);
       const [startPos, setStartPos] = useState({ x: 0, y: 0 });
@@ -991,7 +1088,10 @@ Be specific and technical. Write as a helpful note to your future self.`
 
       const handleDoubleClick = (e) => {
         if (e.target.closest('.card-delete')) return;
-        if (!card.processing) onExpand(card);
+        if (!card.processing) {
+          onMarkViewed(card.id);
+          onExpand(card);
+        }
       };
 
       useEffect(() => {
@@ -1068,6 +1168,7 @@ Be specific and technical. Write as a helpful note to your future self.`
           onMouseDown={handleMouseDown}
           onDoubleClick={handleDoubleClick}
         >
+          {!card.viewed && !card.processing && <span className="unreviewed-dot" title="Unreviewed" />}
           {searchMatch && card.similarity && (
             <span className="search-similarity">{Math.round(card.similarity * 100)}%</span>
           )}
@@ -1125,9 +1226,9 @@ Be specific and technical. Write as a helpful note to your future self.`
         return () => clearInterval(interval);
       }, []);
 
-      // Save board on change
+      // Save board on change (debounced)
       useEffect(() => {
-        saveBoard(board);
+        debouncedSaveBoard(board);
       }, [board]);
 
       // Handle search with debounce
@@ -1330,6 +1431,54 @@ Be specific and technical. Write as a helpful note to your future self.`
         setIsPanning(false);
       }, []);
 
+      // Touch pan/zoom state
+      const touchStartRef = useRef({ x: 0, y: 0, dist: 0, touches: 0 });
+
+      // Touch handlers for mobile pan/zoom
+      const handleTouchStart = useCallback((e) => {
+        if (e.touches.length === 2) {
+          // Two finger - prepare for pan/zoom
+          const touch1 = e.touches[0];
+          const touch2 = e.touches[1];
+          const midX = (touch1.clientX + touch2.clientX) / 2;
+          const midY = (touch1.clientY + touch2.clientY) / 2;
+          const dist = Math.hypot(touch2.clientX - touch1.clientX, touch2.clientY - touch1.clientY);
+          touchStartRef.current = { x: midX, y: midY, dist, touches: 2 };
+        }
+      }, []);
+
+      const handleTouchMove = useCallback((e) => {
+        if (e.touches.length === 2) {
+          e.preventDefault();
+          const touch1 = e.touches[0];
+          const touch2 = e.touches[1];
+          const midX = (touch1.clientX + touch2.clientX) / 2;
+          const midY = (touch1.clientY + touch2.clientY) / 2;
+          const dist = Math.hypot(touch2.clientX - touch1.clientX, touch2.clientY - touch1.clientY);
+
+          // Pan
+          const dx = midX - touchStartRef.current.x;
+          const dy = midY - touchStartRef.current.y;
+          viewport.current.x -= dx / viewport.current.zoom;
+          viewport.current.y -= dy / viewport.current.zoom;
+
+          // Pinch zoom
+          if (touchStartRef.current.dist > 0) {
+            const scale = dist / touchStartRef.current.dist;
+            const newZoom = viewport.current.zoom * scale;
+            viewport.current.zoom = Math.max(0.1, Math.min(5, newZoom));
+            setZoomLevel(Math.round(viewport.current.zoom * 100));
+          }
+
+          touchStartRef.current = { x: midX, y: midY, dist, touches: 2 };
+          updateViewport();
+        }
+      }, [updateViewport]);
+
+      const handleTouchEnd = useCallback(() => {
+        touchStartRef.current = { x: 0, y: 0, dist: 0, touches: 0 };
+      }, []);
+
       // Attach pan/zoom handlers to canvas container
       useEffect(() => {
         const container = canvasRef.current;
@@ -1343,12 +1492,20 @@ Be specific and technical. Write as a helpful note to your future self.`
         container.addEventListener('mousedown', handleMouseDown);
         container.addEventListener('contextmenu', preventContextMenu);
 
+        // Touch events for mobile
+        container.addEventListener('touchstart', handleTouchStart, { passive: true });
+        container.addEventListener('touchmove', handleTouchMove, { passive: false });
+        container.addEventListener('touchend', handleTouchEnd);
+
         return () => {
           container.removeEventListener('wheel', handleWheel);
           container.removeEventListener('mousedown', handleMouseDown);
           container.removeEventListener('contextmenu', preventContextMenu);
+          container.removeEventListener('touchstart', handleTouchStart);
+          container.removeEventListener('touchmove', handleTouchMove);
+          container.removeEventListener('touchend', handleTouchEnd);
         };
-      }, [handleWheel, handleMouseDown]);
+      }, [handleWheel, handleMouseDown, handleTouchStart, handleTouchMove, handleTouchEnd]);
 
       // Global mouse move/up for panning
       useEffect(() => {
@@ -1624,6 +1781,21 @@ Be specific and technical. Write as a helpful note to your future self.`
         }
       };
 
+      const handleMarkViewed = (id) => {
+        setBoard(prev => ({
+          ...prev,
+          cards: prev.cards.map(c =>
+            c.id === id ? { ...c, viewed: true } : c
+          )
+        }));
+      };
+
+      // Calculate stats
+      const totalCards = board.cards.length;
+      const unviewedCount = board.cards.filter(c => !c.viewed && !c.processing).length;
+      const oneWeekAgo = Date.now() - (7 * 24 * 60 * 60 * 1000);
+      const thisWeekCount = board.cards.filter(c => c.timestamp > oneWeekAgo).length;
+
       // Handle file input (for ⌘N)
       const handleFileInput = async (e) => {
         const files = Array.from(e.target.files).filter(f => f.type.startsWith('image/'));
@@ -1700,6 +1872,28 @@ Be specific and technical. Write as a helpful note to your future self.`
               <div className="logo-mark">CC</div>
               <span className="logo-text">Context Capture</span>
             </div>
+
+            {/* Stats */}
+            {totalCards > 0 && (
+              <div className="card-stats">
+                <div className="stat-item">
+                  <span className="stat-value">{totalCards}</span>
+                  <span>card{totalCards !== 1 ? 's' : ''}</span>
+                </div>
+                {unviewedCount > 0 && (
+                  <div className="stat-item">
+                    <span className="stat-value highlight">{unviewedCount}</span>
+                    <span>unreviewed</span>
+                  </div>
+                )}
+                {thisWeekCount > 0 && (
+                  <div className="stat-item">
+                    <span className="stat-value">{thisWeekCount}</span>
+                    <span>this week</span>
+                  </div>
+                )}
+              </div>
+            )}
 
             {/* Search Bar */}
             <div className="search-container">
@@ -1780,6 +1974,7 @@ Be specific and technical. Write as a helpful note to your future self.`
                       onDragEnd={handleCardDragEnd}
                       onDelete={handleDeleteCard}
                       onExpand={setExpandedCard}
+                      onMarkViewed={handleMarkViewed}
                       searchMatch={isMatch}
                       searchHidden={isHidden}
                       viewport={viewport}
@@ -1818,6 +2013,20 @@ Be specific and technical. Write as a helpful note to your future self.`
           <div className={`zoom-indicator ${showZoomIndicator ? 'visible' : ''}`}>
             {zoomLevel}%
           </div>
+
+          {/* Mobile Add Button */}
+          <button
+            className="mobile-add-btn"
+            onClick={() => {
+              if (!apiKey) {
+                setShowApiModal(true);
+              } else {
+                fileInputRef.current?.click();
+              }
+            }}
+          >
+            + Add Screenshot
+          </button>
         </div>
       );
     }
