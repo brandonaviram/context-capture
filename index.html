@@ -10,6 +10,8 @@
   <script src="https://unpkg.com/react@18/umd/react.production.min.js" crossorigin></script>
   <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js" crossorigin></script>
   <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+  <!-- PixiJS for canvas rendering -->
+  <script src="https://cdn.jsdelivr.net/npm/pixi.js@8.6.6/dist/pixi.min.js"></script>
   <style>
     /* ===== BASE VARIABLES ===== */
     :root {
@@ -1234,7 +1236,608 @@ Be specific and technical. Write as a helpful note to your future self.`
     }
 
     const DRAG_THRESHOLD = 5; // Minimum pixels before drag starts
+    const DEFAULT_CARD_WIDTH = 280;
+    const DEFAULT_CARD_HEIGHT = 220;
+    const MIN_CARD_WIDTH = 150;
+    const MIN_CARD_HEIGHT = 120;
+    const RESIZE_HANDLE_SIZE = 12;
 
+    // ===== PIXI CANVAS COMPONENT =====
+    function PixiCanvas({
+      cards,
+      viewport,
+      onCardDragEnd,
+      onCardResize,
+      onCardExpand,
+      onCardDelete,
+      onCardMarkViewed,
+      searchResults,
+      activeTagFilter,
+      isDraggingFile,
+      onFileDrop,
+      onViewportChange
+    }) {
+      const containerRef = useRef(null);
+      const appRef = useRef(null);
+      const worldRef = useRef(null);
+      const cardSpritesRef = useRef(new Map()); // cardId -> PIXI.Container
+      const isDraggingRef = useRef(false);
+      const dragCardRef = useRef(null);
+      const dragOffsetRef = useRef({ x: 0, y: 0 });
+      const isPanningRef = useRef(false);
+      const panStartRef = useRef({ x: 0, y: 0 });
+      const lastPinchDistRef = useRef(0);
+      const isResizingRef = useRef(false);
+      const resizeCardRef = useRef(null);
+      const resizeStartRef = useRef({ x: 0, y: 0, width: 0, height: 0 });
+
+      // Initialize PixiJS Application
+      useEffect(() => {
+        if (!containerRef.current || appRef.current) return;
+
+        const initPixi = async () => {
+          const app = new PIXI.Application();
+          await app.init({
+            background: 0x09090B,
+            resizeTo: containerRef.current,
+            antialias: true,
+            resolution: window.devicePixelRatio || 1,
+            autoDensity: true,
+          });
+
+          containerRef.current.appendChild(app.canvas);
+          appRef.current = app;
+
+          // Create world container for pan/zoom
+          const world = new PIXI.Container();
+          world.sortableChildren = true;
+          app.stage.addChild(world);
+          worldRef.current = world;
+
+          // Set initial viewport
+          world.scale.set(viewport.current.zoom);
+          world.position.set(-viewport.current.x * viewport.current.zoom, -viewport.current.y * viewport.current.zoom);
+
+          // Pan with middle mouse or space+drag
+          let spacePressed = false;
+
+          const handleKeyDown = (e) => {
+            if (e.code === 'Space' && document.activeElement.tagName !== 'INPUT') {
+              spacePressed = true;
+              app.canvas.style.cursor = 'grab';
+            }
+          };
+          const handleKeyUp = (e) => {
+            if (e.code === 'Space') {
+              spacePressed = false;
+              if (!isPanningRef.current) app.canvas.style.cursor = 'default';
+            }
+          };
+          window.addEventListener('keydown', handleKeyDown);
+          window.addEventListener('keyup', handleKeyUp);
+
+          // Mouse events for panning
+          app.canvas.addEventListener('pointerdown', (e) => {
+            if (e.button === 1 || (e.button === 0 && spacePressed)) {
+              isPanningRef.current = true;
+              panStartRef.current = { x: e.clientX, y: e.clientY };
+              app.canvas.style.cursor = 'grabbing';
+            }
+          });
+
+          app.canvas.addEventListener('pointermove', (e) => {
+            if (isPanningRef.current) {
+              const dx = e.clientX - panStartRef.current.x;
+              const dy = e.clientY - panStartRef.current.y;
+
+              viewport.current.x -= dx / viewport.current.zoom;
+              viewport.current.y -= dy / viewport.current.zoom;
+
+              world.position.set(-viewport.current.x * viewport.current.zoom, -viewport.current.y * viewport.current.zoom);
+
+              panStartRef.current = { x: e.clientX, y: e.clientY };
+              onViewportChange?.();
+            }
+          });
+
+          app.canvas.addEventListener('pointerup', () => {
+            if (isPanningRef.current) {
+              isPanningRef.current = false;
+              app.canvas.style.cursor = spacePressed ? 'grab' : 'default';
+            }
+          });
+
+          // Wheel zoom (centered on cursor)
+          app.canvas.addEventListener('wheel', (e) => {
+            e.preventDefault();
+            const scaleFactor = e.deltaY > 0 ? 0.9 : 1.1;
+            const rect = app.canvas.getBoundingClientRect();
+
+            const mouseX = e.clientX - rect.left;
+            const mouseY = e.clientY - rect.top;
+
+            // World coords before zoom
+            const worldX = (mouseX / viewport.current.zoom) + viewport.current.x;
+            const worldY = (mouseY / viewport.current.zoom) + viewport.current.y;
+
+            // Update zoom
+            viewport.current.zoom = Math.max(0.1, Math.min(5, viewport.current.zoom * scaleFactor));
+
+            // Adjust to keep mouse stable
+            viewport.current.x = worldX - (mouseX / viewport.current.zoom);
+            viewport.current.y = worldY - (mouseY / viewport.current.zoom);
+
+            world.scale.set(viewport.current.zoom);
+            world.position.set(-viewport.current.x * viewport.current.zoom, -viewport.current.y * viewport.current.zoom);
+            onViewportChange?.();
+          }, { passive: false });
+
+          // Touch pinch zoom
+          app.canvas.addEventListener('touchstart', (e) => {
+            if (e.touches.length === 2) {
+              const dist = Math.hypot(
+                e.touches[1].clientX - e.touches[0].clientX,
+                e.touches[1].clientY - e.touches[0].clientY
+              );
+              lastPinchDistRef.current = dist;
+            }
+          }, { passive: true });
+
+          app.canvas.addEventListener('touchmove', (e) => {
+            if (e.touches.length === 2) {
+              e.preventDefault();
+              const dist = Math.hypot(
+                e.touches[1].clientX - e.touches[0].clientX,
+                e.touches[1].clientY - e.touches[0].clientY
+              );
+
+              if (lastPinchDistRef.current > 0) {
+                const scale = dist / lastPinchDistRef.current;
+                viewport.current.zoom = Math.max(0.1, Math.min(5, viewport.current.zoom * scale));
+                world.scale.set(viewport.current.zoom);
+                world.position.set(-viewport.current.x * viewport.current.zoom, -viewport.current.y * viewport.current.zoom);
+                onViewportChange?.();
+              }
+
+              lastPinchDistRef.current = dist;
+            }
+          }, { passive: false });
+
+          // Double-click to reset view
+          app.canvas.addEventListener('dblclick', (e) => {
+            if (e.target === app.canvas) {
+              viewport.current = { x: 0, y: 0, zoom: 1 };
+              world.scale.set(1);
+              world.position.set(0, 0);
+              onViewportChange?.();
+            }
+          });
+
+          // Cleanup
+          return () => {
+            window.removeEventListener('keydown', handleKeyDown);
+            window.removeEventListener('keyup', handleKeyUp);
+          };
+        };
+
+        initPixi();
+
+        return () => {
+          if (appRef.current) {
+            appRef.current.destroy(true, { children: true });
+            appRef.current = null;
+          }
+        };
+      }, []);
+
+      // Create/update card sprites
+      useEffect(() => {
+        if (!worldRef.current || !appRef.current) return;
+
+        const world = worldRef.current;
+        const existingIds = new Set(cardSpritesRef.current.keys());
+        const currentIds = new Set(cards.map(c => c.id));
+
+        // Remove deleted cards
+        existingIds.forEach(id => {
+          if (!currentIds.has(id)) {
+            const container = cardSpritesRef.current.get(id);
+            if (container) {
+              world.removeChild(container);
+              container.destroy({ children: true });
+              cardSpritesRef.current.delete(id);
+            }
+          }
+        });
+
+        // Helper to redraw a card with current dimensions
+        const redrawCard = (container, width, height, isHighlighted = false) => {
+          const imageHeight = Math.round(height * 0.636); // ~140/220 ratio
+
+          // Redraw background
+          container.bg.clear();
+          container.bg.roundRect(0, 0, width, height, 8);
+          container.bg.fill(0x18181b);
+          container.bg.stroke({ width: isHighlighted ? 2 : 1, color: isHighlighted ? 0xf59e0b : 0x27272a });
+
+          // Update image bg
+          if (container.imgBg) {
+            container.imgBg.clear();
+            container.imgBg.rect(0, 0, width, imageHeight);
+            container.imgBg.fill(0x09090B);
+          }
+
+          // Update image sprite
+          if (container.imageSprite) {
+            container.imageSprite.width = width;
+            container.imageSprite.height = imageHeight;
+          }
+
+          // Update caption position and wrap width
+          if (container.captionText) {
+            container.captionText.position.set(12, imageHeight + 10);
+            container.captionText.style.wordWrapWidth = width - 24;
+          }
+
+          // Update timestamp position
+          if (container.timeText) {
+            container.timeText.position.set(12, height - 20);
+          }
+
+          // Update delete button position
+          if (container.deleteBtn) {
+            container.deleteBtn.position.set(width - 32, 8);
+          }
+
+          // Update resize handle position
+          if (container.resizeHandle) {
+            container.resizeHandle.position.set(width - RESIZE_HANDLE_SIZE - 4, height - RESIZE_HANDLE_SIZE - 4);
+          }
+
+          // Store current dimensions
+          container.cardWidth = width;
+          container.cardHeight = height;
+        };
+
+        // Add/update cards
+        cards.forEach(card => {
+          let container = cardSpritesRef.current.get(card.id);
+          const cardWidth = card.width || DEFAULT_CARD_WIDTH;
+          const cardHeight = card.height || DEFAULT_CARD_HEIGHT;
+          const imageHeight = Math.round(cardHeight * 0.636);
+
+          if (!container) {
+            // Create new card container
+            container = new PIXI.Container();
+            container.eventMode = 'static';
+            container.cursor = 'grab';
+            container.cardId = card.id;
+            container.cardWidth = cardWidth;
+            container.cardHeight = cardHeight;
+
+            // Card background
+            const bg = new PIXI.Graphics();
+            bg.roundRect(0, 0, cardWidth, cardHeight, 8);
+            bg.fill(0x18181b);
+            bg.stroke({ width: 1, color: 0x27272a });
+            container.addChild(bg);
+            container.bg = bg;
+
+            // Image placeholder
+            const imgBg = new PIXI.Graphics();
+            imgBg.rect(0, 0, cardWidth, imageHeight);
+            imgBg.fill(0x09090B);
+            container.addChild(imgBg);
+            container.imgBg = imgBg;
+
+            // Load image as texture
+            if (card.image) {
+              const texture = PIXI.Texture.from(card.image);
+              const sprite = new PIXI.Sprite(texture);
+              sprite.width = cardWidth;
+              sprite.height = imageHeight;
+              sprite.position.set(0, 0);
+              container.addChild(sprite);
+              container.imageSprite = sprite;
+            }
+
+            // Caption text
+            const captionText = new PIXI.Text({
+              text: card.processing ? 'Analyzing...' : (card.caption || '').slice(0, 100) + ((card.caption?.length > 100) ? '...' : ''),
+              style: {
+                fontFamily: 'Roboto, sans-serif',
+                fontSize: 12,
+                fill: 0xa1a1aa,
+                wordWrap: true,
+                wordWrapWidth: cardWidth - 24,
+              }
+            });
+            captionText.position.set(12, imageHeight + 10);
+            container.addChild(captionText);
+            container.captionText = captionText;
+
+            // Timestamp
+            const timeText = new PIXI.Text({
+              text: new Date(card.timestamp).toLocaleString(),
+              style: {
+                fontFamily: 'Roboto Mono, monospace',
+                fontSize: 9,
+                fill: 0x71717a,
+              }
+            });
+            timeText.position.set(12, cardHeight - 20);
+            container.addChild(timeText);
+            container.timeText = timeText;
+
+            // Delete button (top right)
+            const deleteBtn = new PIXI.Graphics();
+            deleteBtn.roundRect(0, 0, 24, 24, 4);
+            deleteBtn.fill({ color: 0x000000, alpha: 0.6 });
+            deleteBtn.position.set(cardWidth - 32, 8);
+            deleteBtn.eventMode = 'static';
+            deleteBtn.cursor = 'pointer';
+            deleteBtn.alpha = 0;
+            deleteBtn.on('pointerdown', (e) => {
+              e.stopPropagation();
+              onCardDelete(card.id);
+            });
+
+            const deleteX = new PIXI.Text({
+              text: '✕',
+              style: { fontSize: 12, fill: 0x71717a }
+            });
+            deleteX.position.set(6, 4);
+            deleteBtn.addChild(deleteX);
+            container.addChild(deleteBtn);
+            container.deleteBtn = deleteBtn;
+
+            // Resize handle (bottom-right corner)
+            const resizeHandle = new PIXI.Container();
+            resizeHandle.eventMode = 'static';
+            resizeHandle.cursor = 'se-resize';
+            resizeHandle.position.set(cardWidth - RESIZE_HANDLE_SIZE - 4, cardHeight - RESIZE_HANDLE_SIZE - 4);
+
+            // Invisible hit area (larger for easier clicking)
+            const hitArea = new PIXI.Graphics();
+            hitArea.rect(0, 0, RESIZE_HANDLE_SIZE + 8, RESIZE_HANDLE_SIZE + 8);
+            hitArea.fill({ color: 0x000000, alpha: 0 });
+            resizeHandle.addChild(hitArea);
+
+            // Visible handle (corner lines)
+            const handleVisual = new PIXI.Graphics();
+            handleVisual.moveTo(RESIZE_HANDLE_SIZE + 4, 4);
+            handleVisual.lineTo(RESIZE_HANDLE_SIZE + 4, RESIZE_HANDLE_SIZE + 4);
+            handleVisual.lineTo(4, RESIZE_HANDLE_SIZE + 4);
+            handleVisual.stroke({ width: 2, color: 0x71717a });
+            resizeHandle.addChild(handleVisual);
+
+            resizeHandle.alpha = 0;
+            container.addChild(resizeHandle);
+            container.resizeHandle = resizeHandle;
+
+            // Resize handle events
+            resizeHandle.on('pointerdown', (e) => {
+              e.stopPropagation();
+              isResizingRef.current = true;
+              resizeCardRef.current = card.id;
+              resizeStartRef.current = {
+                x: e.global.x,
+                y: e.global.y,
+                width: container.cardWidth,
+                height: container.cardHeight
+              };
+              container.zIndex = 1000;
+            });
+
+            resizeHandle.on('globalpointermove', (e) => {
+              if (!isResizingRef.current || resizeCardRef.current !== card.id) return;
+
+              const dx = (e.global.x - resizeStartRef.current.x) / viewport.current.zoom;
+              const dy = (e.global.y - resizeStartRef.current.y) / viewport.current.zoom;
+
+              const newWidth = Math.max(MIN_CARD_WIDTH, resizeStartRef.current.width + dx);
+              const newHeight = Math.max(MIN_CARD_HEIGHT, resizeStartRef.current.height + dy);
+
+              redrawCard(container, newWidth, newHeight);
+            });
+
+            resizeHandle.on('pointerup', (e) => {
+              if (!isResizingRef.current || resizeCardRef.current !== card.id) return;
+
+              isResizingRef.current = false;
+              resizeCardRef.current = null;
+              container.zIndex = 0;
+
+              // Save new dimensions
+              onCardResize(card.id, container.cardWidth, container.cardHeight);
+            });
+
+            resizeHandle.on('pointerupoutside', (e) => {
+              if (!isResizingRef.current || resizeCardRef.current !== card.id) return;
+
+              isResizingRef.current = false;
+              resizeCardRef.current = null;
+              container.zIndex = 0;
+
+              onCardResize(card.id, container.cardWidth, container.cardHeight);
+            });
+
+            // Hover effects
+            container.on('pointerover', () => {
+              container.deleteBtn.alpha = 1;
+              container.resizeHandle.alpha = 1;
+              container.bg.clear();
+              container.bg.roundRect(0, 0, container.cardWidth, container.cardHeight, 8);
+              container.bg.fill(0x18181b);
+              container.bg.stroke({ width: 1, color: 0x3f3f46 });
+            });
+
+            container.on('pointerout', () => {
+              if (!isDraggingRef.current || dragCardRef.current !== card.id) {
+                container.deleteBtn.alpha = 0;
+                container.resizeHandle.alpha = 0;
+                container.bg.clear();
+                container.bg.roundRect(0, 0, container.cardWidth, container.cardHeight, 8);
+                container.bg.fill(0x18181b);
+                container.bg.stroke({ width: 1, color: 0x27272a });
+              }
+            });
+
+            // Drag handling
+            let dragStartPos = { x: 0, y: 0 };
+            let hasMoved = false;
+
+            container.on('pointerdown', (e) => {
+              if (e.target === container.deleteBtn || e.target === container.resizeHandle) return;
+              if (isResizingRef.current) return;
+              e.stopPropagation();
+
+              dragStartPos = { x: e.global.x, y: e.global.y };
+              hasMoved = false;
+
+              const worldPos = world.toLocal(e.global);
+              dragOffsetRef.current = {
+                x: worldPos.x - container.x,
+                y: worldPos.y - container.y
+              };
+              dragCardRef.current = card.id;
+
+              container.zIndex = 1000;
+              container.cursor = 'grabbing';
+            });
+
+            container.on('globalpointermove', (e) => {
+              if (dragCardRef.current !== card.id || isResizingRef.current) return;
+
+              const dx = Math.abs(e.global.x - dragStartPos.x);
+              const dy = Math.abs(e.global.y - dragStartPos.y);
+
+              if (dx > DRAG_THRESHOLD || dy > DRAG_THRESHOLD) {
+                hasMoved = true;
+                isDraggingRef.current = true;
+
+                const worldPos = world.toLocal(e.global);
+                container.x = worldPos.x - dragOffsetRef.current.x;
+                container.y = worldPos.y - dragOffsetRef.current.y;
+              }
+            });
+
+            container.on('pointerup', (e) => {
+              if (dragCardRef.current !== card.id) return;
+
+              container.zIndex = 0;
+              container.cursor = 'grab';
+
+              if (hasMoved) {
+                onCardDragEnd(card.id, container.x, container.y);
+              }
+
+              isDraggingRef.current = false;
+              dragCardRef.current = null;
+            });
+
+            container.on('pointerupoutside', (e) => {
+              if (dragCardRef.current !== card.id) return;
+
+              container.zIndex = 0;
+              container.cursor = 'grab';
+
+              if (hasMoved) {
+                onCardDragEnd(card.id, container.x, container.y);
+              }
+
+              isDraggingRef.current = false;
+              dragCardRef.current = null;
+            });
+
+            // Double-click to expand
+            let lastClickTime = 0;
+            container.on('pointertap', () => {
+              const now = Date.now();
+              if (now - lastClickTime < 300) {
+                onCardMarkViewed(card.id);
+                onCardExpand(card);
+              }
+              lastClickTime = now;
+            });
+
+            world.addChild(container);
+            cardSpritesRef.current.set(card.id, container);
+          }
+
+          // Update position
+          container.x = card.x;
+          container.y = card.y;
+
+          // Update dimensions if changed (e.g., from stored state)
+          if (container.cardWidth !== cardWidth || container.cardHeight !== cardHeight) {
+            redrawCard(container, cardWidth, cardHeight);
+          }
+
+          // Update caption if changed
+          if (container.captionText) {
+            const newText = card.processing ? 'Analyzing...' : (card.caption || '').slice(0, 100) + ((card.caption?.length > 100) ? '...' : '');
+            if (container.captionText.text !== newText) {
+              container.captionText.text = newText;
+              container.captionText.style.fill = card.processing ? 0x71717a : 0xa1a1aa;
+            }
+          }
+
+          // Search/filter visibility
+          const isSearching = searchResults !== null;
+          const isMatch = isSearching && searchResults.includes(card.id);
+          const matchesTag = !activeTagFilter || (card.tags || []).includes(activeTagFilter);
+          const isHidden = (isSearching && !isMatch) || (activeTagFilter && !matchesTag);
+
+          container.alpha = isHidden ? 0.2 : 1;
+          container.eventMode = isHidden ? 'none' : 'static';
+
+          // Highlight matched cards
+          if (isMatch && !isHidden) {
+            redrawCard(container, container.cardWidth, container.cardHeight, true);
+          }
+        });
+      }, [cards, searchResults, activeTagFilter, onCardDragEnd, onCardResize, onCardExpand, onCardDelete, onCardMarkViewed]);
+
+      // Handle file drop
+      const handleDrop = (e) => {
+        e.preventDefault();
+        const files = Array.from(e.dataTransfer.files).filter(f => f.type.startsWith('image/'));
+        if (files.length > 0) {
+          // Calculate drop position in world coords
+          const rect = containerRef.current.getBoundingClientRect();
+          const x = ((e.clientX - rect.left) / viewport.current.zoom) + viewport.current.x;
+          const y = ((e.clientY - rect.top) / viewport.current.zoom) + viewport.current.y;
+          onFileDrop(files, x, y);
+        }
+      };
+
+      return (
+        <div
+          ref={containerRef}
+          style={{ width: '100%', height: '100%', position: 'relative' }}
+          onDrop={handleDrop}
+          onDragOver={(e) => e.preventDefault()}
+        >
+          {/* Empty state overlay */}
+          {cards.length === 0 && !isDraggingFile && (
+            <div className="empty-state">
+              <div className="empty-state-icon">📸</div>
+              <h3 className="empty-state-title">Drop screenshots here</h3>
+              <p className="empty-state-text">
+                Drag images onto the canvas or paste with <span className="kbd">⌘V</span>.
+                AI will automatically describe what's in each screenshot.
+              </p>
+              <p className="empty-state-hint">
+                <span className="kbd">Space</span> + drag to pan · scroll to zoom
+              </p>
+            </div>
+          )}
+        </div>
+      );
+    }
+
+    // ===== OLD CARD COMPONENT (kept for reference, will be removed) =====
     function Card({ card, onDragStart, onDragEnd, onDelete, onExpand, onMarkViewed, onAddTag, onRemoveTag, onTagClick, onCopyMarkdown, activeTagFilter, searchMatch, searchHidden, viewport }) {
       const [isAddingTag, setIsAddingTag] = useState(false);
       const [newTag, setNewTag] = useState('');
@@ -1427,18 +2030,15 @@ Be specific and technical. Write as a helpful note to your future self.`
       const [webhookUrl, setWebhookUrl] = useState(loadWebhook);
       const [showSettingsModal, setShowSettingsModal] = useState(false);
       const [isDraggingFile, setIsDraggingFile] = useState(false);
-      const [draggingCardId, setDraggingCardId] = useState(null);
       const [expandedCard, setExpandedCard] = useState(null);
       const [brainConnected, setBrainConnected] = useState(false);
       const [searchQuery, setSearchQuery] = useState('');
       const [searchResults, setSearchResults] = useState(null); // null = not searching, [] = no results
-      const [isPanning, setIsPanning] = useState(false);
-      const [isSpaceHeld, setIsSpaceHeld] = useState(false);
+      // Note: panning/space state now handled by PixiCanvas internally
       const [showZoomIndicator, setShowZoomIndicator] = useState(false);
       const [zoomLevel, setZoomLevel] = useState(100);
       const [activeTagFilter, setActiveTagFilter] = useState(null);
       const canvasRef = useRef(null);
-      const viewportRef = useRef(null);
       const fileInputRef = useRef(null);
       const searchInputRef = useRef(null);
       const searchTimeoutRef = useRef(null);
@@ -1446,8 +2046,6 @@ Be specific and technical. Write as a helpful note to your future self.`
 
       // Viewport state (use ref to avoid re-renders on every pan/zoom)
       const viewport = useRef({ x: 0, y: 0, zoom: 1 });
-      const panStart = useRef({ x: 0, y: 0 });
-      const spacePressed = useRef(false);
 
       // Check brain connection on mount
       useEffect(() => {
@@ -1562,309 +2160,7 @@ Be specific and technical. Write as a helpful note to your future self.`
         return () => window.removeEventListener('keydown', handleKeyDown);
       }, [apiKey]);
 
-      // Update viewport transform (GPU-accelerated)
-      const updateViewport = useCallback(() => {
-        if (!viewportRef.current) return;
-        const { x, y, zoom } = viewport.current;
-        viewportRef.current.style.transform = `scale(${zoom}) translate(${-x}px, ${-y}px)`;
-      }, []);
-
-      // Reset viewport to origin
-      const resetViewport = useCallback(() => {
-        viewport.current = { x: 0, y: 0, zoom: 1 };
-        updateViewport();
-        setZoomLevel(100);
-        setShowZoomIndicator(true);
-        setTimeout(() => setShowZoomIndicator(false), 1000);
-      }, [updateViewport]);
-
-      // Space key tracking for pan + reset view shortcuts
-      useEffect(() => {
-        const handleKeyDown = (e) => {
-          if (e.code === 'Space' && !e.repeat && document.activeElement.tagName !== 'INPUT') {
-            e.preventDefault();
-            spacePressed.current = true;
-            setIsSpaceHeld(true);
-          }
-          // Press 0 or Home to reset view
-          if ((e.key === '0' || e.key === 'Home') && document.activeElement.tagName !== 'INPUT') {
-            e.preventDefault();
-            resetViewport();
-          }
-        };
-        const handleKeyUp = (e) => {
-          if (e.code === 'Space') {
-            spacePressed.current = false;
-            setIsSpaceHeld(false);
-          }
-        };
-        window.addEventListener('keydown', handleKeyDown);
-        window.addEventListener('keyup', handleKeyUp);
-        return () => {
-          window.removeEventListener('keydown', handleKeyDown);
-          window.removeEventListener('keyup', handleKeyUp);
-        };
-      }, [resetViewport]);
-
-      // Wheel zoom (centered on cursor)
-      const handleWheel = useCallback((e) => {
-        if (!viewportRef.current) return;
-        e.preventDefault();
-
-        const scaleFactor = e.deltaY > 0 ? 0.9 : 1.1;
-        const rect = viewportRef.current.getBoundingClientRect();
-        if (!rect.width || !rect.height) return; // Defensive check
-
-        // Mouse position relative to viewport
-        const mouseX = e.clientX - rect.left;
-        const mouseY = e.clientY - rect.top;
-
-        // Convert to world coordinates
-        const worldX = (mouseX / viewport.current.zoom) + viewport.current.x;
-        const worldY = (mouseY / viewport.current.zoom) + viewport.current.y;
-
-        // Update zoom
-        viewport.current.zoom *= scaleFactor;
-        viewport.current.zoom = Math.max(0.1, Math.min(5, viewport.current.zoom));
-
-        // Adjust position to keep mouse point stable
-        viewport.current.x = worldX - (mouseX / viewport.current.zoom);
-        viewport.current.y = worldY - (mouseY / viewport.current.zoom);
-
-        updateViewport();
-
-        // Show zoom indicator
-        setZoomLevel(Math.round(viewport.current.zoom * 100));
-        setShowZoomIndicator(true);
-
-        // Hide after 1 second
-        clearTimeout(window.zoomIndicatorTimeout);
-        window.zoomIndicatorTimeout = setTimeout(() => {
-          setShowZoomIndicator(false);
-        }, 1000);
-      }, [updateViewport]);
-
-      // Pan handlers (middle-click or space+drag)
-      const handleMouseDown = useCallback((e) => {
-        // Middle mouse button or space+left click
-        if (e.button === 1 || (e.button === 0 && spacePressed.current)) {
-          e.preventDefault();
-          setIsPanning(true);
-          panStart.current = { x: e.clientX, y: e.clientY };
-        }
-      }, []);
-
-      const handleMouseMove = useCallback((e) => {
-        if (!isPanning) return;
-
-        const dx = e.clientX - panStart.current.x;
-        const dy = e.clientY - panStart.current.y;
-
-        viewport.current.x -= dx / viewport.current.zoom;
-        viewport.current.y -= dy / viewport.current.zoom;
-
-        panStart.current = { x: e.clientX, y: e.clientY };
-        updateViewport();
-      }, [isPanning, updateViewport]);
-
-      const handleMouseUp = useCallback(() => {
-        setIsPanning(false);
-      }, []);
-
-      // Touch pan/zoom state
-      const touchStartRef = useRef({ x: 0, y: 0, dist: 0, touches: 0 });
-
-      // Touch handlers for mobile pan/zoom
-      const handleTouchStart = useCallback((e) => {
-        if (e.touches.length === 2) {
-          // Two finger - prepare for pan/zoom
-          const touch1 = e.touches[0];
-          const touch2 = e.touches[1];
-          const midX = (touch1.clientX + touch2.clientX) / 2;
-          const midY = (touch1.clientY + touch2.clientY) / 2;
-          const dist = Math.hypot(touch2.clientX - touch1.clientX, touch2.clientY - touch1.clientY);
-          touchStartRef.current = { x: midX, y: midY, dist, touches: 2 };
-        }
-      }, []);
-
-      const handleTouchMove = useCallback((e) => {
-        if (e.touches.length === 2) {
-          e.preventDefault();
-          const touch1 = e.touches[0];
-          const touch2 = e.touches[1];
-          const midX = (touch1.clientX + touch2.clientX) / 2;
-          const midY = (touch1.clientY + touch2.clientY) / 2;
-          const dist = Math.hypot(touch2.clientX - touch1.clientX, touch2.clientY - touch1.clientY);
-
-          // Pan
-          const dx = midX - touchStartRef.current.x;
-          const dy = midY - touchStartRef.current.y;
-          viewport.current.x -= dx / viewport.current.zoom;
-          viewport.current.y -= dy / viewport.current.zoom;
-
-          // Pinch zoom
-          if (touchStartRef.current.dist > 0) {
-            const scale = dist / touchStartRef.current.dist;
-            const newZoom = viewport.current.zoom * scale;
-            viewport.current.zoom = Math.max(0.1, Math.min(5, newZoom));
-            setZoomLevel(Math.round(viewport.current.zoom * 100));
-          }
-
-          touchStartRef.current = { x: midX, y: midY, dist, touches: 2 };
-          updateViewport();
-        }
-      }, [updateViewport]);
-
-      const handleTouchEnd = useCallback(() => {
-        touchStartRef.current = { x: 0, y: 0, dist: 0, touches: 0 };
-      }, []);
-
-      // Attach pan/zoom handlers to canvas container
-      useEffect(() => {
-        const container = canvasRef.current;
-        if (!container) return;
-
-        const preventContextMenu = (e) => {
-          if (e.button === 1) e.preventDefault(); // Prevent middle-click context menu
-        };
-
-        container.addEventListener('wheel', handleWheel, { passive: false });
-        container.addEventListener('mousedown', handleMouseDown);
-        container.addEventListener('contextmenu', preventContextMenu);
-
-        // Touch events for mobile
-        container.addEventListener('touchstart', handleTouchStart, { passive: true });
-        container.addEventListener('touchmove', handleTouchMove, { passive: false });
-        container.addEventListener('touchend', handleTouchEnd);
-
-        return () => {
-          container.removeEventListener('wheel', handleWheel);
-          container.removeEventListener('mousedown', handleMouseDown);
-          container.removeEventListener('contextmenu', preventContextMenu);
-          container.removeEventListener('touchstart', handleTouchStart);
-          container.removeEventListener('touchmove', handleTouchMove);
-          container.removeEventListener('touchend', handleTouchEnd);
-        };
-      }, [handleWheel, handleMouseDown, handleTouchStart, handleTouchMove, handleTouchEnd]);
-
-      // Global mouse move/up for panning
-      useEffect(() => {
-        if (!isPanning) return;
-
-        window.addEventListener('mousemove', handleMouseMove);
-        window.addEventListener('mouseup', handleMouseUp);
-
-        return () => {
-          window.removeEventListener('mousemove', handleMouseMove);
-          window.removeEventListener('mouseup', handleMouseUp);
-        };
-      }, [isPanning, handleMouseMove, handleMouseUp]);
-
-      // Handle file drop
-      const handleDrop = useCallback(async (e) => {
-        e.preventDefault();
-        setIsDraggingFile(false);
-
-        if (!apiKey) {
-          setShowSettingsModal(true);
-          return;
-        }
-
-        const files = Array.from(e.dataTransfer.files).filter(f =>
-          f.type.startsWith('image/')
-        );
-
-        if (files.length === 0) return;
-
-        // Get viewport to calculate world coordinates
-        const viewportRect = viewportRef.current.getBoundingClientRect();
-
-        for (let i = 0; i < files.length; i++) {
-          const file = files[i];
-
-          // Dedupe by file name + size + lastModified
-          const fileKey = `${file.name}-${file.size}-${file.lastModified}`;
-          if (processingFilesRef.current.has(fileKey)) continue;
-          processingFilesRef.current.add(fileKey);
-
-          const reader = new FileReader();
-          const currentFileKey = fileKey; // Capture for closure
-          const fileIndex = i; // Capture for position offset
-
-          reader.onload = async (event) => {
-            try {
-              const rawImage = event.target.result;
-              const id = Date.now() + '-' + Math.random().toString(36).substr(2, 9);
-
-              // Compress for storage (use raw for AI analysis)
-              const imageBase64 = await compressImage(rawImage);
-
-              // Calculate position in world space (accounting for zoom and pan)
-              const screenX = e.clientX - viewportRect.left;
-              const screenY = e.clientY - viewportRect.top;
-
-              const worldX = (screenX / viewport.current.zoom) + viewport.current.x - 140 + (fileIndex * 30);
-              const worldY = (screenY / viewport.current.zoom) + viewport.current.y - 100 + (fileIndex * 30);
-
-              // Add card immediately with processing state
-              const newCard = {
-                id,
-                image: imageBase64,
-                caption: '',
-                x: Math.max(0, worldX),
-                y: Math.max(0, worldY),
-                timestamp: Date.now(),
-                processing: true
-              };
-
-              setBoard(prev => ({
-                ...prev,
-                cards: [...prev.cards, newCard]
-              }));
-
-              // Analyze with AI (use raw for better quality)
-              try {
-                const caption = await analyzeScreenshot(rawImage, apiKey);
-                const updatedCard = { ...newCard, caption, processing: false };
-
-                setBoard(prev => ({
-                  ...prev,
-                  cards: prev.cards.map(c =>
-                    c.id === id ? updatedCard : c
-                  )
-                }));
-
-                // Sync to Brain for semantic search
-                if (brainConnected) {
-                  try {
-                    await brainAddCard(updatedCard);
-                  } catch (err) {
-                    console.warn('Failed to sync card to Brain:', err);
-                  }
-                }
-
-                // Fire webhook
-                fireWebhook(webhookUrl, updatedCard);
-              } catch (error) {
-                console.error('AI analysis failed:', error);
-                setBoard(prev => ({
-                  ...prev,
-                  cards: prev.cards.map(c =>
-                    c.id === id
-                      ? { ...c, caption: `Analysis failed: ${error.message}`, processing: false }
-                      : c
-                  )
-                }));
-              }
-            } finally {
-              // Clear from processing set after delay to prevent rapid re-adds
-              setTimeout(() => processingFilesRef.current.delete(currentFileKey), 1000);
-            }
-          };
-
-          reader.readAsDataURL(file);
-        }
-      }, [apiKey, brainConnected]);
+      // Note: Pan/zoom/drop now handled by PixiCanvas component
 
       // Handle paste
       useEffect(() => {
@@ -1985,16 +2281,103 @@ Be specific and technical. Write as a helpful note to your future self.`
         }
       };
 
-      const handleCardDragStart = (id) => {
-        setDraggingCardId(id);
+      // Handle file drop from PixiCanvas
+      const handleFileDrop = async (files, worldX, worldY) => {
+        setIsDraggingFile(false);
+
+        if (!apiKey) {
+          setShowSettingsModal(true);
+          return;
+        }
+
+        for (let i = 0; i < files.length; i++) {
+          const file = files[i];
+
+          // Dedupe by file name + size + lastModified
+          const fileKey = `${file.name}-${file.size}-${file.lastModified}`;
+          if (processingFilesRef.current.has(fileKey)) continue;
+          processingFilesRef.current.add(fileKey);
+
+          const reader = new FileReader();
+          const currentFileKey = fileKey;
+          const fileIndex = i;
+
+          reader.onload = async (event) => {
+            try {
+              const rawImage = event.target.result;
+              const id = Date.now() + '-' + Math.random().toString(36).substr(2, 9);
+
+              const imageBase64 = await compressImage(rawImage);
+
+              const newCard = {
+                id,
+                image: imageBase64,
+                caption: '',
+                x: Math.max(0, worldX - 140 + (fileIndex * 30)),
+                y: Math.max(0, worldY - 100 + (fileIndex * 30)),
+                timestamp: Date.now(),
+                processing: true
+              };
+
+              setBoard(prev => ({
+                ...prev,
+                cards: [...prev.cards, newCard]
+              }));
+
+              try {
+                const caption = await analyzeScreenshot(rawImage, apiKey);
+                const updatedCard = { ...newCard, caption, processing: false };
+
+                setBoard(prev => ({
+                  ...prev,
+                  cards: prev.cards.map(c =>
+                    c.id === id ? updatedCard : c
+                  )
+                }));
+
+                if (brainConnected) {
+                  try {
+                    await brainAddCard(updatedCard);
+                  } catch (err) {
+                    console.warn('Failed to sync card to Brain:', err);
+                  }
+                }
+
+                fireWebhook(webhookUrl, updatedCard);
+              } catch (error) {
+                console.error('AI analysis failed:', error);
+                setBoard(prev => ({
+                  ...prev,
+                  cards: prev.cards.map(c =>
+                    c.id === id
+                      ? { ...c, caption: `Analysis failed: ${error.message}`, processing: false }
+                      : c
+                  )
+                }));
+              }
+            } finally {
+              setTimeout(() => processingFilesRef.current.delete(currentFileKey), 1000);
+            }
+          };
+
+          reader.readAsDataURL(file);
+        }
       };
 
       const handleCardDragEnd = (id, x, y) => {
-        setDraggingCardId(null);
         setBoard(prev => ({
           ...prev,
           cards: prev.cards.map(c =>
             c.id === id ? { ...c, x, y } : c
+          )
+        }));
+      };
+
+      const handleCardResize = (id, width, height) => {
+        setBoard(prev => ({
+          ...prev,
+          cards: prev.cards.map(c =>
+            c.id === id ? { ...c, width, height } : c
           )
         }));
       };
@@ -2297,67 +2680,29 @@ Be specific and technical. Write as a helpful note to your future self.`
 
           <div
             ref={canvasRef}
-            className={`canvas-container ${isSpaceHeld ? 'space-held' : ''} ${isPanning ? 'panning' : ''}`}
-            onDrop={handleDrop}
+            className="canvas-container"
             onDragOver={handleDragOver}
             onDragLeave={handleDragLeave}
-            onDoubleClick={(e) => {
-              // Double-click on empty canvas resets view
-              if (e.target === canvasRef.current || e.target.classList.contains('canvas') || e.target.classList.contains('canvas-viewport')) {
-                resetViewport();
-              }
-            }}
           >
-            {/* Empty state outside viewport so it doesn't transform */}
-            {board.cards.length === 0 && !isDraggingFile && (
-              <div className="empty-state">
-                <div className="empty-state-icon">📸</div>
-                <h3 className="empty-state-title">Drop screenshots here</h3>
-                <p className="empty-state-text">
-                  Drag images onto the canvas or paste with <span className="kbd">⌘V</span>.
-                  AI will automatically describe what's in each screenshot.
-                </p>
-                <p className="empty-state-hint">
-                  <span className="kbd">Space</span> + drag to pan · scroll to zoom
-                </p>
-              </div>
-            )}
-
-            <div className="canvas-viewport" ref={viewportRef}>
-              <div className="canvas">
-                <div className={`drop-zone ${board.cards.length === 0 ? 'active' : ''} ${isDraggingFile ? 'dragging' : ''}`} />
-
-                {board.cards.map(card => {
-                  const isSearching = searchResults !== null;
-                  const isMatch = isSearching && searchResults.includes(card.id);
-                  const isHidden = isSearching && !isMatch;
-
-                  // Tag filter
-                  const matchesTagFilter = !activeTagFilter || (card.tags || []).includes(activeTagFilter);
-                  const isTagFiltered = activeTagFilter && !matchesTagFilter;
-
-                  return (
-                    <Card
-                      key={card.id}
-                      card={card}
-                      onDragStart={handleCardDragStart}
-                      onDragEnd={handleCardDragEnd}
-                      onDelete={handleDeleteCard}
-                      onExpand={setExpandedCard}
-                      onMarkViewed={handleMarkViewed}
-                      onAddTag={handleAddTag}
-                      onRemoveTag={handleRemoveTag}
-                      onTagClick={handleTagClick}
-                      onCopyMarkdown={handleCopyMarkdown}
-                      activeTagFilter={activeTagFilter}
-                      searchMatch={isMatch}
-                      searchHidden={isHidden || isTagFiltered}
-                      viewport={viewport}
-                    />
-                  );
-                })}
-              </div>
-            </div>
+            <PixiCanvas
+              cards={board.cards}
+              viewport={viewport}
+              onCardDragEnd={handleCardDragEnd}
+              onCardResize={handleCardResize}
+              onCardExpand={setExpandedCard}
+              onCardDelete={handleDeleteCard}
+              onCardMarkViewed={handleMarkViewed}
+              searchResults={searchResults}
+              activeTagFilter={activeTagFilter}
+              isDraggingFile={isDraggingFile}
+              onFileDrop={handleFileDrop}
+              onViewportChange={() => {
+                setZoomLevel(Math.round(viewport.current.zoom * 100));
+                setShowZoomIndicator(true);
+                clearTimeout(window.zoomIndicatorTimeout);
+                window.zoomIndicatorTimeout = setTimeout(() => setShowZoomIndicator(false), 1000);
+              }}
+            />
           </div>
 
           {/* Hidden file input for ⌘N shortcut */}
