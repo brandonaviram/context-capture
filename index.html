@@ -885,7 +885,41 @@
     // ===== STORAGE =====
     const STORAGE_KEY = 'context-capture-board';
     const API_KEY_STORAGE = 'context-capture-api-key';
+    const WEBHOOK_STORAGE = 'context-capture-webhook';
     const BRAIN_API_URL = 'http://127.0.0.1:8770';
+
+    function loadWebhook() {
+      return localStorage.getItem(WEBHOOK_STORAGE) || '';
+    }
+
+    function saveWebhook(url) {
+      localStorage.setItem(WEBHOOK_STORAGE, url);
+    }
+
+    // Fire webhook on card capture
+    async function fireWebhook(webhookUrl, card) {
+      if (!webhookUrl) return;
+      try {
+        await fetch(webhookUrl, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          mode: 'no-cors', // Allow cross-origin without CORS
+          body: JSON.stringify({
+            event: 'card_captured',
+            timestamp: new Date().toISOString(),
+            card: {
+              id: card.id,
+              caption: card.caption,
+              tags: card.tags || [],
+              captured_at: new Date(card.timestamp).toISOString()
+              // Note: image omitted to keep payload small
+            }
+          })
+        });
+      } catch (err) {
+        console.warn('Webhook failed:', err);
+      }
+    }
 
     // ===== BRAIN API =====
     async function brainHealth() {
@@ -1103,20 +1137,22 @@ Be specific and technical. Write as a helpful note to your future self.`
     }
 
     // ===== COMPONENTS =====
-    function ApiKeyModal({ onSave, onClose }) {
-      const [key, setKey] = useState('');
+    function SettingsModal({ apiKey: initialApiKey, webhookUrl: initialWebhook, onSave, onClose }) {
+      const [key, setKey] = useState(initialApiKey || '');
+      const [webhook, setWebhook] = useState(initialWebhook || '');
       const [validating, setValidating] = useState(false);
       const [error, setError] = useState('');
 
       const handleSave = async () => {
-        if (!key.startsWith('sk-')) return;
-
         setValidating(true);
         setError('');
 
         try {
-          await validateApiKey(key);
-          onSave(key);
+          // Only validate if key changed and is non-empty
+          if (key && key !== initialApiKey && key.startsWith('sk-')) {
+            await validateApiKey(key);
+          }
+          onSave({ apiKey: key, webhookUrl: webhook });
         } catch (err) {
           setError(err.message || 'Failed to validate API key');
         } finally {
@@ -1127,10 +1163,9 @@ Be specific and technical. Write as a helpful note to your future self.`
       return (
         <div className="modal-overlay" onClick={onClose}>
           <div className="modal" onClick={e => e.stopPropagation()}>
-            <h2 className="modal-title">API Key Required</h2>
+            <h2 className="modal-title">Settings</h2>
             <p className="modal-description">
-              Enter your Anthropic API key to enable AI-powered context generation.
-              Your key is stored locally and never sent anywhere except Anthropic's API.
+              Configure your API key and integrations. All settings are stored locally.
             </p>
             <div className="input-group">
               <label className="input-label">Anthropic API Key</label>
@@ -1141,18 +1176,30 @@ Be specific and technical. Write as a helpful note to your future self.`
                 value={key}
                 onChange={e => { setKey(e.target.value); setError(''); }}
                 autoFocus
-                onKeyDown={e => e.key === 'Enter' && handleSave()}
               />
               {error && <div className="error-message">{error}</div>}
+            </div>
+            <div className="input-group">
+              <label className="input-label">Webhook URL (optional)</label>
+              <input
+                type="url"
+                className="input"
+                placeholder="https://your-webhook.com/capture"
+                value={webhook}
+                onChange={e => setWebhook(e.target.value)}
+              />
+              <div style={{ fontSize: '11px', color: 'var(--color-text-muted)', marginTop: '4px' }}>
+                POSTs card data (caption, tags, timestamp) on each capture
+              </div>
             </div>
             <div className="modal-actions">
               <button className="btn" onClick={onClose}>Cancel</button>
               <button
                 className={`btn btn-primary ${validating ? 'btn-loading' : ''}`}
                 onClick={handleSave}
-                disabled={!key.startsWith('sk-') || validating}
+                disabled={validating}
               >
-                {validating ? 'Validating...' : 'Save Key'}
+                {validating ? 'Validating...' : 'Save'}
               </button>
             </div>
           </div>
@@ -1377,7 +1424,8 @@ Be specific and technical. Write as a helpful note to your future self.`
     function App() {
       const [board, setBoard] = useState(loadBoard);
       const [apiKey, setApiKey] = useState(loadApiKey);
-      const [showApiModal, setShowApiModal] = useState(false);
+      const [webhookUrl, setWebhookUrl] = useState(loadWebhook);
+      const [showSettingsModal, setShowSettingsModal] = useState(false);
       const [isDraggingFile, setIsDraggingFile] = useState(false);
       const [draggingCardId, setDraggingCardId] = useState(null);
       const [expandedCard, setExpandedCard] = useState(null);
@@ -1504,7 +1552,7 @@ Be specific and technical. Write as a helpful note to your future self.`
           if ((e.metaKey || e.ctrlKey) && e.key === 'n') {
             e.preventDefault();
             if (!apiKey) {
-              setShowApiModal(true);
+              setShowSettingsModal(true);
             } else {
               fileInputRef.current?.click();
             }
@@ -1718,7 +1766,7 @@ Be specific and technical. Write as a helpful note to your future self.`
         setIsDraggingFile(false);
 
         if (!apiKey) {
-          setShowApiModal(true);
+          setShowSettingsModal(true);
           return;
         }
 
@@ -1794,6 +1842,9 @@ Be specific and technical. Write as a helpful note to your future self.`
                     console.warn('Failed to sync card to Brain:', err);
                   }
                 }
+
+                // Fire webhook
+                fireWebhook(webhookUrl, updatedCard);
               } catch (error) {
                 console.error('AI analysis failed:', error);
                 setBoard(prev => ({
@@ -1831,7 +1882,7 @@ Be specific and technical. Write as a helpful note to your future self.`
           isPastingRef = true; // Lock
 
           if (!apiKey) {
-            setShowApiModal(true);
+            setShowSettingsModal(true);
             isPastingRef = false;
             return;
           }
@@ -1894,6 +1945,9 @@ Be specific and technical. Write as a helpful note to your future self.`
                     console.warn('Failed to sync card to Brain:', err);
                   }
                 }
+
+                // Fire webhook
+                fireWebhook(webhookUrl, updatedCard);
               } catch (error) {
                 setBoard(prev => ({
                   ...prev,
@@ -1961,10 +2015,16 @@ Be specific and technical. Write as a helpful note to your future self.`
         }
       };
 
-      const handleSaveApiKey = (key) => {
-        setApiKey(key);
-        saveApiKey(key);
-        setShowApiModal(false);
+      const handleSaveSettings = ({ apiKey: key, webhookUrl: webhook }) => {
+        if (key !== undefined) {
+          setApiKey(key);
+          saveApiKey(key);
+        }
+        if (webhook !== undefined) {
+          setWebhookUrl(webhook);
+          saveWebhook(webhook);
+        }
+        setShowSettingsModal(false);
       };
 
       const handleClearBoard = () => {
@@ -2017,6 +2077,41 @@ Be specific and technical. Write as a helpful note to your future self.`
         } catch (err) {
           console.error('Failed to copy:', err);
         }
+      };
+
+      // Export all cards to markdown file
+      const handleExportMarkdown = () => {
+        if (board.cards.length === 0) return;
+
+        const sortedCards = [...board.cards].sort((a, b) => b.timestamp - a.timestamp);
+
+        let md = `# Context Capture Export\n\n`;
+        md += `*Exported: ${new Date().toLocaleString()}*\n`;
+        md += `*Total cards: ${sortedCards.length}*\n\n`;
+        md += `---\n\n`;
+
+        sortedCards.forEach((card, i) => {
+          md += `## ${i + 1}. ${new Date(card.timestamp).toLocaleDateString()}\n\n`;
+          md += `${card.caption || 'No caption'}\n\n`;
+          if (card.tags?.length) {
+            md += `**Tags:** ${card.tags.map(t => '#' + t).join(' ')}\n\n`;
+          }
+          md += `*Captured: ${new Date(card.timestamp).toLocaleString()}*\n\n`;
+          // Include image as base64 (large but self-contained)
+          md += `![Screenshot](${card.image})\n\n`;
+          md += `---\n\n`;
+        });
+
+        // Create and download file
+        const blob = new Blob([md], { type: 'text/markdown' });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = `context-capture-${new Date().toISOString().split('T')[0]}.md`;
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        URL.revokeObjectURL(url);
       };
 
       // Get all unique tags across cards
@@ -2087,6 +2182,9 @@ Be specific and technical. Write as a helpful note to your future self.`
                   console.warn('Failed to sync card to Brain:', err);
                 }
               }
+
+              // Fire webhook
+              fireWebhook(webhookUrl, updatedCard);
             } catch (error) {
               setBoard(prev => ({
                 ...prev,
@@ -2158,13 +2256,18 @@ Be specific and technical. Write as a helpful note to your future self.`
                 <span className={`status-dot ${apiKey ? 'connected' : ''}`}></span>
               </div>
 
-              <button className="btn btn-icon" onClick={() => setShowApiModal(true)} title="API Key">
-                🔑
+              <button className="btn btn-icon" onClick={() => setShowSettingsModal(true)} title="Settings">
+                ⚙️
               </button>
               {board.cards.length > 0 && (
-                <button className="btn btn-icon" onClick={handleClearBoard} title="Clear Board">
-                  🗑
-                </button>
+                <>
+                  <button className="btn btn-icon" onClick={handleExportMarkdown} title="Export as Markdown">
+                    📥
+                  </button>
+                  <button className="btn btn-icon" onClick={handleClearBoard} title="Clear Board">
+                    🗑
+                  </button>
+                </>
               )}
             </div>
           </header>
@@ -2267,10 +2370,12 @@ Be specific and technical. Write as a helpful note to your future self.`
             onChange={handleFileInput}
           />
 
-          {showApiModal && (
-            <ApiKeyModal
-              onSave={handleSaveApiKey}
-              onClose={() => setShowApiModal(false)}
+          {showSettingsModal && (
+            <SettingsModal
+              apiKey={apiKey}
+              webhookUrl={webhookUrl}
+              onSave={handleSaveSettings}
+              onClose={() => setShowSettingsModal(false)}
             />
           )}
 
@@ -2291,7 +2396,7 @@ Be specific and technical. Write as a helpful note to your future self.`
             className="mobile-add-btn"
             onClick={() => {
               if (!apiKey) {
-                setShowApiModal(true);
+                setShowSettingsModal(true);
               } else {
                 fileInputRef.current?.click();
               }
